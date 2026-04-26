@@ -388,7 +388,8 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    RMS_X = torch.sqrt(torch.mean(in_features**2, dim=-1, keepdim=True) + eps)
+    return weights * in_features / RMS_X
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -403,8 +404,9 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         SiLU to each element.
     """
     
-    m = nn.SiLU()
-    return m(in_features)
+    # m = nn.SiLU()
+    # return m(in_features)
+    return in_features * torch.sigmoid(in_features)
 
 
 def run_get_batch(
@@ -451,8 +453,10 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    m = nn.Softmax(dim=dim)
-    return m(in_features)
+    # m = nn.Softmax(dim=dim)
+    # return m(in_features)
+    exped_in_features = torch.exp(in_features - in_features.max(dim=dim, keepdim=True)[0])
+    return exped_in_features / exped_in_features.sum(dim=dim, keepdim=True)
 
 
 def run_cross_entropy(
@@ -470,8 +474,13 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    m = nn.CrossEntropyLoss()
-    return m(inputs, targets)
+    # m = nn.CrossEntropyLoss()
+    # return m(inputs, targets)
+    #  do it by hand
+    target_logits = inputs.gather(1, targets.unsqueeze(1)).squeeze(1)
+    log_partition = torch.logsumexp(inputs, dim=1)
+    loss_i = -target_logits + log_partition
+    return loss_i.mean()
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
