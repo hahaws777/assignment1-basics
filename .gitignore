@@ -161,3 +161,15 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+# Assignment-specific local artifacts
+data/
+local_test.py
+
+# Editor/OS local files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
