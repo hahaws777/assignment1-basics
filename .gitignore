@@ -165,6 +165,9 @@ cython_debug/
 # Assignment-specific local artifacts
 data/
 local_test.py
+.wsl-venv/
+.direnv/
+.envrc
 
 # Editor/OS local files
 .vscode/

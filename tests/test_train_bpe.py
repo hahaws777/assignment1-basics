@@ -5,6 +5,7 @@ from .adapters import run_train_bpe
 from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
 
 
+
 def test_train_bpe_speed():
     """
     Ensure that BPE training is relatively efficient by measuring training

@@ -8,6 +8,14 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from einops import einsum
+import regex as re  # 使用 regex 库替换 re
+from collections import Counter
+from .tokenizer import BPETokenizer
+
+gpt2_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+# from tokenizer import *
 
 
 def run_linear(
@@ -28,6 +36,7 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    
 
     raise NotImplementedError
 
@@ -543,7 +552,7 @@ def get_tokenizer(
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
     special_tokens: list[str] | None = None,
-) -> Any:
+) -> BPETokenizer:
     """Given a vocabulary, a list of merges, and a list of special tokens,
     return a BPE tokenizer that uses the provided vocab, merges, and special tokens.
 
@@ -559,7 +568,87 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return BPETokenizer(vocab, merges, special_tokens)
+
+
+def count_pretoken_frequencies(
+    text: str,
+    special_tokens: list[str],
+) -> Counter:
+    """
+    Count the frequency of each word in the text.
+    """
+    # 先初始化 vocab：special tokens + 256 个 byte token
+    # split by the special tokens
+    if special_tokens:
+        special_pattern = "|".join(
+            re.escape(tok) for tok in sorted(special_tokens, key=len, reverse=True)
+        )
+        chunks = re.split(special_pattern, text)
+    else:
+        chunks = [text]
+
+    pre_train_word_counts = Counter()
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        for match in re.finditer(gpt2_pattern, chunk):
+            word = match.group(0)
+            raw_word = word.encode("utf-8")
+            byte_tuple = tuple(bytes([b]) for b in raw_word)
+            pre_train_word_counts[byte_tuple] +=1
+
+    return pre_train_word_counts
+
+
+def merge_word(
+    word: tuple[bytes, ...],
+    pair: tuple[bytes, bytes],
+) -> tuple[bytes, ...]:
+    new_word = None
+    i = 0
+
+    while i < len(word):
+        if (
+            i < len(word) - 1
+            and word[i] == pair[0]
+            and word[i + 1] == pair[1]
+        ):
+            if new_word is None:
+                new_word = list(word[:i])
+            new_word.append(pair[0] + pair[1])
+            i += 2
+        else:
+            if new_word is not None:
+                new_word.append(word[i])
+            i += 1
+
+    return word if new_word is None else tuple(new_word)
+
+
+def merge_pretoken_counts(
+    counter: Counter,
+    pair: tuple[bytes, bytes],
+) -> Counter:
+    new_counter = Counter()
+
+    for word, count in counter.items():
+        new_word = merge_word(word, pair)
+        new_counter[new_word] += count
+
+    return new_counter
+
+def count_adjacent_pair_frequencies(counter: Counter) -> Counter:
+    """
+    Count the frequency of each pair of bytes of the counter and return a counter ranked by the frequency
+    """
+    pair_counts = Counter()
+    for word, count in counter.items():
+        for i in range(len(word)-1):
+            pair = (word[i], word[i + 1])
+            pair_counts[pair] += count
+    return pair_counts
 
 
 def run_train_bpe(
@@ -589,4 +678,30 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    vocab = {}
+    merges = []
+    # initialize the vocab with the special tokens and 256 byte tokens
+    for tok in special_tokens:
+        tok = tok.encode("utf-8")
+        if tok not in vocab.values():
+            vocab[len(vocab)] = tok
+
+    for b in range(256):
+        byte_token = bytes([b])
+        if byte_token not in vocab.values():
+            vocab[len(vocab)] = byte_token
+    # read the input file
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    # count the frequency of each word
+    pre_train_word_counts = count_pretoken_frequencies(text, special_tokens)
+    while len(vocab) < vocab_size:
+        # count the frequency of each pair of bytes
+        adjacent_pair_counts = count_adjacent_pair_frequencies(pre_train_word_counts)
+        # get the most frequent pair
+        best_pair = max(adjacent_pair_counts, key=lambda p: (adjacent_pair_counts[p], p))
+        merged_token = best_pair[0] + best_pair[1]
+        merges.append(best_pair)
+        vocab[len(vocab)] = merged_token
+        pre_train_word_counts = merge_pretoken_counts(pre_train_word_counts, best_pair)
+    return vocab, merges
