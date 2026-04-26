@@ -12,6 +12,7 @@ from einops import einsum
 import regex as re  # 使用 regex 库替换 re
 from collections import Counter
 from .tokenizer import BPETokenizer
+import torch.nn as nn
 
 gpt2_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -36,9 +37,8 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-    
-
-    raise NotImplementedError
+    # Using einops' einsum for batch matrix multiplication (linear layer):
+    return einsum(in_features, weights, " ... d_in, d_out d_in -> ... d_out")
 
 
 def run_embedding(
@@ -59,8 +59,7 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    return weights[token_ids]   
 
 
 def run_swiglu(
@@ -92,6 +91,8 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
+
+
     raise NotImplementedError
 
 
@@ -401,7 +402,9 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    
+    m = nn.SiLU()
+    return m(in_features)
 
 
 def run_get_batch(
@@ -424,7 +427,15 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    dataset = torch.tensor(dataset, dtype=torch.long)
+    max_index = len(dataset) - context_length -1
+    starting_indices = torch.randint(0, max_index + 1, (batch_size,))
+
+    x = torch.stack([dataset[starting_index:starting_index + context_length] for starting_index in starting_indices])
+    y = torch.stack([dataset[starting_index + 1:starting_index + context_length + 1] for starting_index in starting_indices])
+    x = x.to(device)
+    y = y.to(device)
+    return x, y
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -440,7 +451,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    m = nn.Softmax(dim=dim)
+    return m(in_features)
 
 
 def run_cross_entropy(
@@ -458,7 +470,8 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    m = nn.CrossEntropyLoss()
+    return m(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
