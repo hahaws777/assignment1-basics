@@ -14,7 +14,7 @@ from collections import Counter
 from .tokenizer import BPETokenizer
 from .RotaryPositionalEmbedding import RotaryPositionalEmbedding
 import torch.nn as nn
-
+from .adamw import AdamW
 gpt2_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 # from tokenizer import *
@@ -426,7 +426,24 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    # token embeddings
+    x = run_embedding(vocab_size, d_model, weights["token_embeddings.weight"], in_indices)
+    # transformer blocks
+    for i in range(num_layers):
+        prefix = f"layers.{i}."
+        layer_weights = {
+            k[len(prefix):]: v
+            for k, v in weights.items()
+            if k.startswith(prefix)
+        }
+        x = run_transformer_block(d_model, num_heads, 
+        d_ff, context_length, rope_theta, 
+        layer_weights, x)
+    # final rmsnorm
+    x = run_rmsnorm(d_model, eps=1e-5, weights=weights["ln_final.weight"], in_features=x)
+    # language model head
+    output = run_linear(d_in=d_model, d_out=vocab_size, weights=weights["lm_head.weight"], in_features=x)
+    return output  
 
 
 def run_rmsnorm(
@@ -560,7 +577,8 @@ def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
