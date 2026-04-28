@@ -12,6 +12,7 @@ from einops import einsum
 import regex as re  # 使用 regex 库替换 re
 from collections import Counter
 from .tokenizer import BPETokenizer
+from .RotaryPositionalEmbedding import RotaryPositionalEmbedding
 import torch.nn as nn
 
 gpt2_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -91,9 +92,8 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-
-
-    raise NotImplementedError
+    # SwiGLU(x) = W2( SiLU(W1 x) * (W3 x) )
+    return run_linear(d_ff, d_model, w2_weight, run_silu(run_linear(d_model, d_ff, w1_weight, in_features)) * run_linear(d_model, d_ff, w3_weight, in_features))
 
 
 def run_scaled_dot_product_attention(
@@ -114,7 +114,12 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    d_k = Q.shape[-1]
+    attn_scores = einsum(Q, K, " ... queries d_k, ... keys d_k -> ... queries keys") / (d_k ** 0.5)
+    if mask is not None:
+        attn_scores = attn_scores.masked_fill(~mask, float("-inf"))
+    attn_weights = run_softmax(attn_scores, dim=-1)
+    return einsum(attn_weights, V, " ... queries keys, ... keys d_v -> ... queries d_v")  
 
 
 def run_multihead_self_attention(
@@ -148,8 +153,22 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
-
+    head_dim = d_model // num_heads
+    Q = run_linear(d_in=d_model, d_out=d_model, weights=q_proj_weight, in_features=in_features)
+    K = run_linear(d_in=d_model, d_out=d_model, weights=k_proj_weight, in_features=in_features)
+    V = run_linear(d_in=d_model, d_out=d_model, weights=v_proj_weight, in_features=in_features)
+    *batch_dims, seq_len, _ = in_features.shape
+    if token_positions is None:
+        token_positions = torch.arange(seq_len, device=in_features.device)
+    Q = Q.reshape(*batch_dims, seq_len, num_heads, head_dim).transpose(-3, -2)
+    K = K.reshape(*batch_dims, seq_len, num_heads, head_dim).transpose(-3, -2)
+    V = V.reshape(*batch_dims, seq_len, num_heads, head_dim).transpose(-3, -2)
+    mask = torch.tril(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device)
+    )
+    attn_output = run_scaled_dot_product_attention(Q, K, V, mask)
+    attn_output = attn_output.transpose(-3, -2).reshape(*batch_dims, seq_len, d_model)
+    return run_linear(d_in=d_model, d_out=d_model, weights=o_proj_weight, in_features=attn_output)
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -188,7 +207,22 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    head_dim = d_model // num_heads
+    Q = run_linear(d_in=d_model, d_out=d_model, weights=q_proj_weight, in_features=in_features)
+    K = run_linear(d_in=d_model, d_out=d_model, weights=k_proj_weight, in_features=in_features)
+    V = run_linear(d_in=d_model, d_out=d_model, weights=v_proj_weight, in_features=in_features)
+    *batch_dims, seq_len, _ = in_features.shape
+    Q = Q.reshape(*batch_dims, seq_len, num_heads, head_dim).transpose(-3, -2)
+    Q = run_rope(head_dim, theta, max_seq_len, Q, token_positions)
+    K = K.reshape(*batch_dims, seq_len, num_heads, head_dim).transpose(-3, -2)
+    K = run_rope(head_dim, theta, max_seq_len, K, token_positions)
+    V = V.reshape(*batch_dims, seq_len, num_heads, head_dim).transpose(-3, -2)
+    mask = torch.tril(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device)
+    )
+    attn_output = run_scaled_dot_product_attention(Q, K, V, mask)
+    attn_output = attn_output.transpose(-3, -2).reshape(*batch_dims, seq_len, d_model)
+    return run_linear(d_in=d_model, d_out=d_model, weights=o_proj_weight, in_features=attn_output)
 
 
 def run_rope(
@@ -210,7 +244,10 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len, device=in_query_or_key.device)
+    if token_positions is None:
+        token_positions = torch.arange(in_query_or_key.shape[-2], device=in_query_or_key.device)
+    return rope(in_query_or_key, token_positions.to(in_query_or_key.device))
 
 
 def run_transformer_block(
@@ -283,8 +320,32 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
 
+    x = in_features
+    attn_input = run_rmsnorm(d_model, eps=1e-5, weights=weights["ln1.weight"], in_features=x)
+    attn_output = run_multihead_self_attention_with_rope(
+        d_model=d_model,
+        num_heads=num_heads,
+        max_seq_len=max_seq_len,
+        theta=theta,
+        q_proj_weight=weights["attn.q_proj.weight"],
+        k_proj_weight=weights["attn.k_proj.weight"],
+        v_proj_weight=weights["attn.v_proj.weight"],
+        o_proj_weight=weights["attn.output_proj.weight"],
+        in_features=attn_input,
+    )
+    x = x + attn_output
+
+    ffn_input = run_rmsnorm(d_model, eps=1e-5, weights=weights["ln2.weight"], in_features=x)
+    ffn_output = run_swiglu(
+        d_model=d_model,
+        d_ff=d_ff,
+        w1_weight=weights["ffn.w1.weight"],
+        w2_weight=weights["ffn.w2.weight"],
+        w3_weight=weights["ffn.w3.weight"],
+        in_features=ffn_input,
+    )
+    return x + ffn_output
 
 def run_transformer_lm(
     vocab_size: int,
