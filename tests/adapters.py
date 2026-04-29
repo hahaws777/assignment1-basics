@@ -20,6 +20,9 @@ gpt2_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|
 # from tokenizer import *
 
 
+EPS = 1e-6
+
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -570,7 +573,17 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    params = [p for p in parameters if p.grad is not None]
+    if len(params) == 0:
+        return
+
+    total_norm = torch.norm(torch.stack([torch.norm(p.grad) for p in params]), p=2)
+    if total_norm > max_l2_norm:
+        scale = max_l2_norm / (total_norm + EPS)
+    else:
+        scale = 1.0
+    for p in params:
+        p.grad.data.mul_(scale)
 
 
 def get_adamw_cls() -> Any:
@@ -606,7 +619,15 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    if it < warmup_iters:
+        return max_learning_rate * it / warmup_iters
+    import math
+    if warmup_iters <= it <= cosine_cycle_iters:
+        learning_range = max_learning_rate - min_learning_rate
+        ratio = 0.5 * (1+math.cos(math.pi * (it - warmup_iters) / (cosine_cycle_iters - warmup_iters)))
+        return min_learning_rate + learning_range * ratio
+    if it > cosine_cycle_iters:
+        return min_learning_rate
 
 
 def run_save_checkpoint(
@@ -625,6 +646,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
+
     raise NotImplementedError
 
 
