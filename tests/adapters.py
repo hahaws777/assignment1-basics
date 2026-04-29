@@ -4,6 +4,7 @@ import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
 
+import numpy as np
 import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
@@ -510,14 +511,17 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    dataset = torch.tensor(dataset, dtype=torch.long)
-    max_index = len(dataset) - context_length -1
-    starting_indices = torch.randint(0, max_index + 1, (batch_size,))
+    max_start = len(dataset) - context_length - 1
+    if max_start < 0:
+        raise ValueError("dataset is shorter than context_length + 1")
 
-    x = torch.stack([dataset[starting_index:starting_index + context_length] for starting_index in starting_indices])
-    y = torch.stack([dataset[starting_index + 1:starting_index + context_length + 1] for starting_index in starting_indices])
-    x = x.to(device)
-    y = y.to(device)
+    start = np.random.randint(0, max_start + 1, size=batch_size)
+    offsets = np.arange(context_length)
+    x_np = dataset[start[:, None] + offsets[None, :]]
+    y_np = dataset[start[:, None] + offsets[None, :] + 1]
+
+    x = torch.as_tensor(x_np, dtype=torch.long, device=device)
+    y = torch.as_tensor(y_np, dtype=torch.long, device=device)
     return x, y
 
 
@@ -630,6 +634,8 @@ def run_get_lr_cosine_schedule(
         return min_learning_rate
 
 
+
+
 def run_save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -646,8 +652,12 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-
-    raise NotImplementedError
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": iteration
+    }
+    torch.save(checkpoint, out)
 
 
 def run_load_checkpoint(
@@ -668,7 +678,10 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["iteration"]
 
 
 def get_tokenizer(
@@ -821,6 +834,8 @@ def run_train_bpe(
     while len(vocab) < vocab_size:
         # count the frequency of each pair of bytes
         adjacent_pair_counts = count_adjacent_pair_frequencies(pre_train_word_counts)
+        if not adjacent_pair_counts:
+            break
         # get the most frequent pair
         best_pair = max(adjacent_pair_counts, key=lambda p: (adjacent_pair_counts[p], p))
         merged_token = best_pair[0] + best_pair[1]
